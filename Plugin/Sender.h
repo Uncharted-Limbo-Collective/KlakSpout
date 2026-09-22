@@ -27,20 +27,30 @@ public:
         // Lazy initialization
         if (!_texture) initialize();
 
+        // initialize() can fail (it logs and returns), which leaves the
+        // destination texture null. There is nothing to copy into.
+        if (!_texture) return;
+
+        // The source pointer comes from the interop block filled in on the
+        // managed side, and is null whenever the sending texture has no
+        // native resource yet. Wrapping a null resource crashes the D3D
+        // runtime, so drop the frame instead.
+        if (source == nullptr) return;
+
         WRL::ComPtr<IUnknown> unknown(source);
 
         if (_system->isD3D12)
         {
             // DX12: Texture update
             WRL::ComPtr<ID3D12Resource> d3d12;
-            unknown.As(&d3d12);
+            if (FAILED(unknown.As(&d3d12)) || !d3d12) return;
             updateTexture(d3d12.Get());
         }
         else
         {
             // DX11: Texture update
             WRL::ComPtr<ID3D11Resource> d3d11;
-            unknown.As(&d3d11);
+            if (FAILED(unknown.As(&d3d11)) || !d3d11) return;
             updateTexture(d3d11.Get());
         }
     }
