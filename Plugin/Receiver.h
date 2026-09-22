@@ -22,14 +22,33 @@ public:
     void update()
     {
         // Search the Spout name list.
-        unsigned int width, height;
-        HANDLE handle;
-        DWORD format;
+        //
+        // These locals must be initialized. CheckSender() only assigns the
+        // handle and format when it finds a live sender; on failure it zeroes
+        // the width and height but leaves the handle and format untouched.
+        unsigned int width = 0, height = 0;
+        HANDLE handle = nullptr;
+        DWORD format = 0;
         auto res = _system->spout
           .CheckSender(_name.c_str(), width, height, handle, format);
 
+        // The sender isn't available: release the current texture and wait for
+        // it to appear. This is not an error condition - a receiver commonly
+        // outlives its sender, or is created before the sender exists.
+        //
+        // Falling through to the share-handle open below with an unset handle
+        // is undefined behaviour and crashes the D3D runtime.
+        if (!res || handle == nullptr)
+        {
+            _texture = nullptr;
+            _width = 0;
+            _height = 0;
+            _format = Format::Unknown;
+            return;
+        }
+
         // Do nothing further if the current texture is valid.
-        if (res && _texture && _width == width && _height == height) return;
+        if (_texture && _width == width && _height == height) return;
 
         HRESULT hres;
 
@@ -76,8 +95,8 @@ public:
 private:
 
     std::string _name;
-    unsigned int _width, _height;
-    Format _format;
+    unsigned int _width = 0, _height = 0;
+    Format _format = Format::Unknown;
     WRL::ComPtr<IUnknown> _texture;
 };
 
