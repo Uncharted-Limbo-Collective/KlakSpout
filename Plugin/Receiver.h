@@ -21,34 +21,53 @@ public:
 
     void update()
     {
-        // Search the Spout name list.
+        // Look the sender up by its own info block, not through the shared
+        // name list.
         //
-        // These locals must be initialized. CheckSender() only assigns the
-        // handle and format when it finds a live sender; on failure it zeroes
-        // the width and height but leaves the handle and format untouched.
+        // CheckSender() must not be used here. It requires the name to be in
+        // the "SpoutSenderNames" list, and when reading the sender's info block
+        // fails it calls ReleaseSenderName() - deleting a *live* sender from
+        // the list for every Spout app on the machine. That read can fail
+        // while the sender is alive: SpoutSharedMemory::Lock() gives up after
+        // 67 ms, and a sender that is being released and re-registered has no
+        // info block for a moment. A receiver polling every frame gets many
+        // chances to hit either, evicts the sender, and then cannot reconnect
+        // to it because it is no longer listed. FindSender() reads the info
+        // block directly and never writes the list.
+        //
+        // These locals must be initialized: on failure FindSender() leaves
+        // all outputs untouched.
         unsigned int width = 0, height = 0;
         HANDLE handle = nullptr;
         DWORD format = 0;
-        auto res = _system->spout
-          .CheckSender(_name.c_str(), width, height, handle, format);
+        char name[SpoutMaxSenderNameLen] = {};
+        strncpy_s(name, _name.c_str(), _TRUNCATE);
+        auto res = name[0] != 0 && _system->spout
+          .FindSender(name, width, height, handle, format);
 
-        // The sender isn't available: release the current texture and wait for
-        // it to appear. This is not an error condition - a receiver commonly
-        // outlives its sender, or is created before the sender exists.
+        // The sender isn't available. A single failed read is usually the
+        // info mutex timing out, not the sender going away, so keep the
+        // current texture through short gaps instead of dropping it.
         //
         // Falling through to the share-handle open below with an unset handle
         // is undefined behaviour and crashes the D3D runtime.
-        if (!res || handle == nullptr)
+        if (!res || handle == nullptr || width == 0 || height == 0)
         {
+            if (_misses < MissTolerance && ++_misses < MissTolerance) return;
             _texture = nullptr;
+            _handle = nullptr;
             _width = 0;
             _height = 0;
             _format = Format::Unknown;
             return;
         }
 
-        // Do nothing further if the current texture is valid.
-        if (_texture && _width == width && _height == height) return;
+        _misses = 0;
+
+        // Do nothing further if the current texture is valid. The handle is
+        // compared too: a sender can recreate its texture at the same size.
+        if (_texture && _handle == handle &&
+            _width == width && _height == height) return;
 
         HRESULT hres;
 
@@ -69,6 +88,7 @@ public:
             _texture = resource;
         }
 
+        _handle = SUCCEEDED(hres) ? handle : nullptr;  // retry next frame on failure
         _width = width;
         _height = height;
         _format = ToFormat(static_cast<DXGI_FORMAT>(format));
@@ -94,9 +114,15 @@ public:
 
 private:
 
+    // Consecutive failed lookups (about one second of frames) before the
+    // sender is treated as gone and the texture is released.
+    static constexpr int MissTolerance = 60;
+
     std::string _name;
     unsigned int _width = 0, _height = 0;
     Format _format = Format::Unknown;
+    HANDLE _handle = nullptr;
+    int _misses = 0;
     WRL::ComPtr<IUnknown> _texture;
 };
 
